@@ -1,0 +1,97 @@
+name: wq-correction
+
+# 双投递实例（delivery-1/2，共享同一 SQLite 持久卷，靠租约协调）
+# + 两个独立持久库的本地接收服务（疾控 cdc / 科研 research）。
+#
+#   docker compose up --build
+#
+# 演示入口（Swagger UI）：
+#   投递服务 1:  http://localhost:8000/docs
+#   投递服务 2:  http://localhost:8001/docs
+#   疾控接收端:  http://localhost:8002/docs
+#   科研接收端:  http://localhost:8003/docs
+
+services:
+  receiver-cdc:
+    build: ./receiver
+    environment:
+      NAME: cdc
+      DB_PATH: /data/receiver.db
+    volumes:
+      - cdc-data:/data
+    ports:
+      - "8002:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  receiver-research:
+    build: ./receiver
+    environment:
+      NAME: research
+      DB_PATH: /data/receiver.db
+    volumes:
+      - research-data:/data
+    ports:
+      - "8003:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  delivery-1:
+    build: ./delivery
+    environment:
+      INSTANCE_ID: delivery-1
+      DB_PATH: /shared/delivery.db
+      CDC_URL: http://receiver-cdc:8000
+      RESEARCH_URL: http://receiver-research:8000
+      CHAOS_CRASH: "1"   # 开启 /admin/crash 演示端点（崩溃后由 restart 策略拉起）
+      REQUEST_TIMEOUT: "5"   # 大于演示用的 delay_ms，慢响应也能等到回执
+    volumes:
+      - delivery-shared:/shared
+    depends_on:
+      receiver-cdc:
+        condition: service_started
+      receiver-research:
+        condition: service_started
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  delivery-2:
+    build: ./delivery
+    environment:
+      INSTANCE_ID: delivery-2
+      DB_PATH: /shared/delivery.db
+      CDC_URL: http://receiver-cdc:8000
+      RESEARCH_URL: http://receiver-research:8000
+      REQUEST_TIMEOUT: "5"
+    volumes:
+      - delivery-shared:/shared
+    depends_on:
+      receiver-cdc:
+        condition: service_started
+      receiver-research:
+        condition: service_started
+    ports:
+      - "8001:8000"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+volumes:
+  cdc-data:          # 疾控库独立持久卷
+  research-data:     # 科研库独立持久卷
+  delivery-shared:   # 两个投递实例共享的 SQLite（同一宿主机卷，WAL 下安全）
